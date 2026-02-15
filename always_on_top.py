@@ -3,6 +3,14 @@ import ctypes
 from ctypes import wintypes
 import time
 import keyboard
+import threading
+import psutil
+
+# Ensure high priority so script doesn't lag after sleep
+try:
+    p = psutil.Process()
+    p.nice(psutil.HIGH_PRIORITY_CLASS)
+except: pass
 
 user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
@@ -11,6 +19,9 @@ HWND_TOPMOST = -1
 HWND_NOTOPMOST = -2
 SWP_NOMOVE = 0x0002
 SWP_NOSIZE = 0x0001
+
+GWL_EXSTYLE = -20
+WS_EX_TOPMOST = 0x00000008
 
 SetWindowPos = user32.SetWindowPos
 SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
@@ -36,6 +47,10 @@ def is_admin():
 
 def get_foreground_window():
     return user32.GetForegroundWindow()
+
+def is_window_topmost(hwnd):
+    ex_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    return (ex_style & WS_EX_TOPMOST) != 0
 
 def set_always_on_top(hwnd, enable=True):
     rect = wintypes.RECT()
@@ -237,21 +252,42 @@ def main():
     state = {'target_hwnd': None}
 
     def handle_pin():
-        hwnd = get_foreground_window()
-        if hwnd in pinned_windows:
-            set_always_on_top(hwnd, False)
-            reset_native_crop(hwnd)
-            pinned_windows.remove(hwnd)
-        else:
-            set_always_on_top(hwnd, True)
-            pinned_windows.add(hwnd)
-    
+        try:
+            hwnd = get_foreground_window()
+            if not hwnd: return
+
+            # Check if it was pinned by us OR if it already has the TopMost style
+            # We must use GetWindowLongW to check the actual state because sleep/restart clears our local 'pinned_windows' set
+            current_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            is_visually_pinned = (current_style & WS_EX_TOPMOST) != 0
+            
+            # If we think it's pinned in our set, OR windows says it's pinned -> UNPIN IT
+            if (hwnd in pinned_windows) or is_visually_pinned:
+                set_always_on_top(hwnd, False)
+                reset_native_crop(hwnd)
+                if hwnd in pinned_windows:
+                    pinned_windows.remove(hwnd)
+                # Play a system beep sound to confirm action (helpful if UI is stuck)
+                try: ctypes.windll.user32.MessageBeep(0xFFFFFFFF) 
+                except: pass
+            else:
+                set_always_on_top(hwnd, True)
+                pinned_windows.add(hwnd)
+                try: ctypes.windll.user32.MessageBeep(0) 
+                except: pass
+        except Exception as e:
+            print(f"Error in handle_pin: {e}")
+
     def handle_unpin():
-        hwnd = get_foreground_window()
-        set_always_on_top(hwnd, False)
-        reset_native_crop(hwnd)
-        if hwnd in pinned_windows:
-            pinned_windows.remove(hwnd)
+        try:
+             hwnd = get_foreground_window()
+             set_always_on_top(hwnd, False)
+             reset_native_crop(hwnd)
+             if hwnd in pinned_windows:
+                 pinned_windows.remove(hwnd)
+             try: ctypes.windll.user32.MessageBeep(0xFFFFFFFF)
+             except: pass
+        except: pass
 
     def on_crop_selection(region):
         target = state['target_hwnd']
@@ -289,4 +325,13 @@ def main():
             break
 
 if __name__ == "__main__":
+    # Prevent multiple instances by checking for a named mutex/lock file? 
+    # For simplicity, we just run.
+    # Set to high priority for responsiveness
+    import os
+    try:
+        p = psutil.Process(os.getpid())
+        p.nice(psutil.HIGH_PRIORITY_CLASS)
+    except: pass
+    
     main()
